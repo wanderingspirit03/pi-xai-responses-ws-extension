@@ -28,6 +28,7 @@ Optional runtime flags:
 export XAI_WS_REASONING=auto  # auto/off = omit parameter, or force low/high for experiments
 export XAI_WS_STORE=1         # 1/default = let xAI retain response state for tool-result turns
 export XAI_WS_DELTA_CHAIN=1   # 1/default = previous_response_id chaining, 0 = resend full context
+export XAI_WS_TOOL_CHOICE=auto # optional: auto/required/none
 export XAI_WS_URL=wss://api.x.ai/v1/responses
 ```
 

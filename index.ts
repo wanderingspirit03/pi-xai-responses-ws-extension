@@ -58,6 +58,12 @@ function envFlag(name: string, defaultValue: boolean): boolean {
 	return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
+function resolveToolChoice(): string | undefined {
+	const value = process.env.XAI_WS_TOOL_CHOICE?.toLowerCase();
+	if (value === "auto" || value === "required" || value === "none") return value;
+	return undefined;
+}
+
 function contentToInput(content: any): AnyRecord[] {
 	if (typeof content === "string") return [{ type: "input_text", text: content }];
 	if (!Array.isArray(content)) return [{ type: "input_text", text: String(content ?? "") }];
@@ -426,6 +432,10 @@ function streamXaiResponsesWebSocket(model: Model<any>, context: Context, option
 			};
 
 			if (useChain) body.previous_response_id = state.previousResponseId;
+			if (body.tools.length) {
+				const toolChoice = resolveToolChoice();
+				if (toolChoice) body.tool_choice = toolChoice;
+			}
 			if (options?.maxTokens) body.max_output_tokens = options.maxTokens;
 			if (options?.temperature !== undefined) body.temperature = options.temperature;
 			const thinking = resolveThinking(options);
