@@ -1,7 +1,7 @@
 {
   "name": "pi-xai-responses-ws-extension",
   "version": "0.1.0",
-  "description": "Pi extension provider for native xAI Grok Responses over WebSocket.",
+  "description": "Pi extension providers for native xAI Grok Responses over HTTP and WebSocket.",
   "type": "module",
   "license": "MIT",
   "pi": {

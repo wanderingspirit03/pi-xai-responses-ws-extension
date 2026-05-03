@@ -10,9 +10,12 @@ import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/
 
 type AnyRecord = Record<string, any>;
 
-const PROVIDER = "xai-ws";
-const API = "xai-responses-websocket";
+const WS_PROVIDER = "xai-ws";
+const WS_API = "xai-responses-websocket";
+const HTTP_PROVIDER = "xai-responses";
+const HTTP_API = "xai-responses-http";
 const DEFAULT_URL = "wss://api.x.ai/v1/responses";
+const DEFAULT_HTTP_URL = "https://api.x.ai/v1/responses";
 const MAX_SOCKET_AGE_MS = 24 * 60 * 1000;
 
 type SessionState = {
@@ -24,6 +27,7 @@ type SessionState = {
 };
 
 const sessions = new Map<string, SessionState>();
+const httpSessions = new Map<string, { previousResponseId?: string; seenMessages: number }>();
 
 function apiKey(options?: SimpleStreamOptions): string {
 	const key = options?.apiKey || process.env.XAI_API_KEY;
@@ -46,7 +50,7 @@ function closeQuietly(socket: WebSocket) {
 }
 
 function resolveThinking(options?: SimpleStreamOptions): "off" | "low" | "high" | undefined {
-	const override = (process.env.XAI_WS_REASONING || "auto").toLowerCase();
+	const override = (process.env.XAI_RESPONSES_REASONING || process.env.XAI_WS_REASONING || "auto").toLowerCase();
 	if (override === "off" || override === "none" || override === "0") return "off";
 	if (override === "low" || override === "high") return override;
 	return undefined;
@@ -59,7 +63,7 @@ function envFlag(name: string, defaultValue: boolean): boolean {
 }
 
 function resolveToolChoice(): string | undefined {
-	const value = process.env.XAI_WS_TOOL_CHOICE?.toLowerCase();
+	const value = (process.env.XAI_RESPONSES_TOOL_CHOICE || process.env.XAI_WS_TOOL_CHOICE)?.toLowerCase();
 	if (value === "auto" || value === "required" || value === "none") return value;
 	return undefined;
 }
@@ -159,6 +163,64 @@ function makeOutput(model: Model<any>): AssistantMessage {
 		stopReason: "stop",
 		timestamp: Date.now(),
 	};
+}
+
+function applyUsage(model: Model<any>, output: AssistantMessage, usage: AnyRecord | undefined) {
+	if (!usage) return;
+	const cached = usage.input_tokens_details?.cached_tokens || 0;
+	output.usage.input = (usage.input_tokens || 0) - cached;
+	output.usage.output = usage.output_tokens || 0;
+	output.usage.cacheRead = cached;
+	output.usage.totalTokens = usage.total_tokens || output.usage.input + output.usage.output + cached;
+	calculateCost(model as any, output.usage);
+}
+
+function addText(output: AssistantMessage, stream: any, text: string) {
+	if (!text) return;
+	output.content.push({ type: "text", text });
+	const index = output.content.length - 1;
+	stream.push({ type: "text_start", contentIndex: index, partial: output });
+	stream.push({ type: "text_delta", contentIndex: index, delta: text, partial: output });
+	stream.push({ type: "text_end", contentIndex: index, content: text, partial: output });
+}
+
+function addToolCall(output: AssistantMessage, stream: any, item: AnyRecord) {
+	const rawArguments = item.arguments || "{}";
+	const toolCall: ToolCall = {
+		type: "toolCall",
+		id: `${item.call_id || item.id}|${item.id || item.call_id}`,
+		name: item.name || "",
+		arguments: parseJson(rawArguments) || {},
+	};
+	output.content.push(toolCall);
+	const index = output.content.length - 1;
+	stream.push({ type: "toolcall_start", contentIndex: index, partial: output });
+	stream.push({ type: "toolcall_delta", contentIndex: index, delta: rawArguments, partial: output });
+	stream.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
+}
+
+function applyResponseObject(response: AnyRecord, output: AssistantMessage, stream: any, model: Model<any>) {
+	output.responseId = response.id || output.responseId;
+	for (const item of response.output || []) {
+		if (item?.type === "message") {
+			for (const part of item.content || []) {
+				if ((part.type === "output_text" || part.type === "text") && part.text) addText(output, stream, part.text);
+			}
+		} else if (item?.type === "function_call") {
+			addToolCall(output, stream, item);
+		} else if (item?.type?.includes("reasoning")) {
+			const text = item.summary?.map((part: any) => part.text).filter(Boolean).join("\n") || item.text;
+			if (text) {
+				output.content.push({ type: "thinking", thinking: text } as any);
+				const index = output.content.length - 1;
+				stream.push({ type: "thinking_start", contentIndex: index, partial: output });
+				stream.push({ type: "thinking_delta", contentIndex: index, delta: text, partial: output });
+				stream.push({ type: "thinking_end", contentIndex: index, content: text, partial: output });
+			}
+		}
+	}
+	applyUsage(model, output, response.usage);
+	output.stopReason = output.content.some((block) => block.type === "toolCall") ? "toolUse" : "stop";
 }
 
 async function connect(url: string, key: string, signal?: AbortSignal): Promise<WebSocket> {
@@ -383,15 +445,7 @@ async function readResponse(socket: WebSocket, output: AssistantMessage, stream:
 					const item = response.output[i];
 					if (item?.type === "function_call") finishToolCall(String(i), item);
 				}
-				const usage = response.usage;
-				if (usage) {
-					const cached = usage.input_tokens_details?.cached_tokens || 0;
-					output.usage.input = (usage.input_tokens || 0) - cached;
-					output.usage.output = usage.output_tokens || 0;
-					output.usage.cacheRead = cached;
-					output.usage.totalTokens = usage.total_tokens || output.usage.input + output.usage.output + cached;
-					calculateCost(model as any, output.usage);
-				}
+				applyUsage(model, output, response.usage);
 				output.stopReason = output.content.some((block) => block.type === "toolCall") ? "toolUse" : "stop";
 				completed = true;
 				finish();
@@ -471,22 +525,108 @@ function streamXaiResponsesWebSocket(model: Model<any>, context: Context, option
 	return stream;
 }
 
+function streamXaiResponsesHttp(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
+	const stream = createAssistantMessageEventStream();
+	(async () => {
+		const output = makeOutput(model);
+		const key = sessionKey(model, options);
+		const state = httpSessions.get(key) || { seenMessages: 0 };
+		try {
+			const store = envFlag("XAI_RESPONSES_STORE", true);
+			const chainEnabled = envFlag("XAI_RESPONSES_DELTA_CHAIN", store);
+			const useChain = chainEnabled && !!state.previousResponseId && context.messages.length >= state.seenMessages;
+			const startIndex = useChain ? state.seenMessages : 0;
+			const body: AnyRecord = {
+				model: model.id,
+				store,
+				input: convertMessages(context, model, startIndex),
+				tools: convertTools(context) || [],
+			};
+
+			if (useChain) body.previous_response_id = state.previousResponseId;
+			if (body.tools.length) {
+				const toolChoice = resolveToolChoice();
+				if (toolChoice) body.tool_choice = toolChoice;
+			}
+			if (options?.maxTokens) body.max_output_tokens = options.maxTokens;
+			if (options?.temperature !== undefined) body.temperature = options.temperature;
+			const thinking = resolveThinking(options);
+			if (thinking && thinking !== "off") body.reasoning = { effort: thinking };
+
+			stream.push({ type: "start", partial: output });
+			const response = await fetch(model.baseUrl || DEFAULT_HTTP_URL, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${apiKey(options)}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(body),
+				signal: options?.signal,
+			});
+			const text = await response.text();
+			const payload = parseJson(text);
+			if (!response.ok) {
+				const err = payload?.error || payload || {};
+				throw new Error(`${err.code || err.type || response.status}: ${err.message || text}`);
+			}
+			if (payload?.error) {
+				const err = payload.error;
+				throw new Error(`${err.code || err.type || "error"}: ${err.message || JSON.stringify(err)}`);
+			}
+
+			applyResponseObject(payload, output, stream, model);
+			state.previousResponseId = output.responseId;
+			state.seenMessages = context.messages.length + 1;
+			if (output.stopReason === "toolUse") httpSessions.set(key, state);
+			else httpSessions.delete(key);
+			stream.push({ type: "done", reason: output.stopReason as any, message: output });
+			stream.end();
+		} catch (error) {
+			if (/previous_response_not_found|aborted|error/i.test(String(error))) httpSessions.delete(key);
+			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			output.errorMessage = error instanceof Error ? error.message : String(error);
+			stream.push({ type: "error", reason: output.stopReason as any, error: output });
+			stream.end();
+		}
+	})();
+	return stream;
+}
+
+const modelDefaults = {
+	id: "grok-4.3",
+	input: ["text", "image"] as ("text" | "image")[],
+	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
+	contextWindow: 256000,
+	maxTokens: 32768,
+};
+
 export default function (pi: ExtensionAPI) {
-	pi.registerProvider(PROVIDER, {
+	pi.registerProvider(WS_PROVIDER, {
 		baseUrl: process.env.XAI_WS_URL || DEFAULT_URL,
 		apiKey: "XAI_API_KEY",
-		api: API,
+		api: WS_API,
 		streamSimple: streamXaiResponsesWebSocket,
 		models: [
 			{
-				id: "grok-4.3",
+				...modelDefaults,
 				name: "Grok 4.3 (xAI Responses WebSocket)",
-				api: API,
+				api: WS_API,
 				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
-				contextWindow: 256000,
-				maxTokens: 32768,
+			},
+		],
+	});
+
+	pi.registerProvider(HTTP_PROVIDER, {
+		baseUrl: process.env.XAI_RESPONSES_URL || DEFAULT_HTTP_URL,
+		apiKey: "XAI_API_KEY",
+		api: HTTP_API,
+		streamSimple: streamXaiResponsesHttp,
+		models: [
+			{
+				...modelDefaults,
+				name: "Grok 4.3 (xAI Responses HTTP)",
+				api: HTTP_API,
+				reasoning: true,
 			},
 		],
 	});
