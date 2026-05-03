@@ -26,14 +26,16 @@ Optional runtime flags:
 
 ```bash
 export XAI_WS_REASONING=auto  # auto/off = omit parameter, or force low/high for experiments
-export XAI_WS_DELTA_CHAIN=0   # 0 = resend full context each turn, 1 = previous_response_id chaining
+export XAI_WS_STORE=1         # 1/default = let xAI retain response state for tool-result turns
+export XAI_WS_DELTA_CHAIN=1   # 1/default = previous_response_id chaining, 0 = resend full context
 export XAI_WS_URL=wss://api.x.ai/v1/responses
 ```
 
-`XAI_WS_DELTA_CHAIN=0` is the current recommended mode. In live testing on May 3, 2026,
-`previous_response_id` continuation with `store=false` returned a not-found error even on the
-same socket, so full-context WebSocket mode is safer until xAI's deployed behavior matches the
-WebSocket chaining docs.
+`XAI_WS_STORE=1` with response chaining is the current recommended mode for agent/tool workloads.
+In live testing on May 3, 2026, `previous_response_id` continuation with `store=false` returned a
+not-found error even on the same socket. Full-context mode avoids that specific path, but native
+xAI tool-result turns are more reliable when the prior response is retained and continued with
+`previous_response_id`.
 
 ## Model
 

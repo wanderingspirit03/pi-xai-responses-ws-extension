@@ -52,6 +52,12 @@ function resolveThinking(options?: SimpleStreamOptions): "off" | "low" | "high" 
 	return undefined;
 }
 
+function envFlag(name: string, defaultValue: boolean): boolean {
+	const value = process.env[name]?.toLowerCase();
+	if (value === undefined) return defaultValue;
+	return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
 function contentToInput(content: any): AnyRecord[] {
 	if (typeof content === "string") return [{ type: "input_text", text: content }];
 	if (!Array.isArray(content)) return [{ type: "input_text", text: String(content ?? "") }];
@@ -407,13 +413,14 @@ function streamXaiResponsesWebSocket(model: Model<any>, context: Context, option
 		let state: SessionState | undefined;
 		try {
 			state = await acquire(model, options);
-			const chainEnabled = process.env.XAI_WS_DELTA_CHAIN !== "0";
+			const store = envFlag("XAI_WS_STORE", true);
+			const chainEnabled = envFlag("XAI_WS_DELTA_CHAIN", store);
 			const useChain = chainEnabled && !!state.previousResponseId && context.messages.length >= state.seenMessages;
 			const startIndex = useChain ? state.seenMessages : 0;
 			const body: AnyRecord = {
 				type: "response.create",
 				model: model.id,
-				store: false,
+				store,
 				input: convertMessages(context, model, startIndex),
 				tools: convertTools(context) || [],
 			};
