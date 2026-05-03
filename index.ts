@@ -49,8 +49,6 @@ function resolveThinking(options?: SimpleStreamOptions): "off" | "low" | "high" 
 	const override = (process.env.XAI_WS_REASONING || "auto").toLowerCase();
 	if (override === "off" || override === "none" || override === "0") return "off";
 	if (override === "low" || override === "high") return override;
-	if (options?.reasoning === "low") return "low";
-	if (options?.reasoning === "high" || options?.reasoning === "xhigh") return "high";
 	return undefined;
 }
 
