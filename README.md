@@ -5,7 +5,7 @@ Pi provider extension for native xAI Grok Responses over WebSocket.
 ## Install
 
 ```bash
-pi install https://github.com/nickmalozemov/pi-xai-responses-ws-extension
+pi install https://github.com/wanderingspirit03/pi-xai-responses-ws-extension
 ```
 
 For local testing:
