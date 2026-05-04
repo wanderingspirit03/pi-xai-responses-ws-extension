@@ -36,11 +36,21 @@ export XAI_WS_STORE=1         # 1/default = let xAI retain response state for to
 export XAI_WS_DELTA_CHAIN=1   # 1/default = previous_response_id chaining, 0 = resend full context
 export XAI_WS_TOOL_CHOICE=auto # optional: auto/required/none
 export XAI_WS_URL=wss://api.x.ai/v1/responses
+
+export XAI_BASH_GUARD=1              # 1/default = enforce bash tool timeouts
+export XAI_BASH_DEFAULT_TIMEOUT=300  # default timeout for model bash calls, seconds
+export XAI_BASH_SEARCH_TIMEOUT=45    # timeout for broad root grep/find searches, seconds
+export XAI_BASH_MAX_TIMEOUT=900      # cap explicit bash timeouts from the model, seconds
 ```
 
 `xai-responses` is the recommended provider for benchmark runs. It uses plain HTTP
 `/v1/responses` with `store=true` and `previous_response_id` chaining, which avoids the long-lived
 WebSocket continuation path. `xai-ws` remains available for latency experiments.
+
+The extension also installs a small Pi `bash` tool guard. Pi's built-in bash timeout is optional,
+so the guard patches bash tool calls before execution: commands without a timeout get
+`XAI_BASH_DEFAULT_TIMEOUT`, broad root searches such as `grep -r /` or `find /` get
+`XAI_BASH_SEARCH_TIMEOUT`, and model-supplied timeouts are capped by `XAI_BASH_MAX_TIMEOUT`.
 
 ## Model
 

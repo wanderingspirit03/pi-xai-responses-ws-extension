@@ -17,6 +17,9 @@ const HTTP_API = "xai-responses-http";
 const DEFAULT_URL = "wss://api.x.ai/v1/responses";
 const DEFAULT_HTTP_URL = "https://api.x.ai/v1/responses";
 const MAX_SOCKET_AGE_MS = 24 * 60 * 1000;
+const DEFAULT_BASH_TIMEOUT_SECONDS = 300;
+const SEARCH_BASH_TIMEOUT_SECONDS = 45;
+const MAX_BASH_TIMEOUT_SECONDS = 900;
 
 type SessionState = {
 	socket: WebSocket;
@@ -66,6 +69,44 @@ function resolveToolChoice(): string | undefined {
 	const value = (process.env.XAI_RESPONSES_TOOL_CHOICE || process.env.XAI_WS_TOOL_CHOICE)?.toLowerCase();
 	if (value === "auto" || value === "required" || value === "none") return value;
 	return undefined;
+}
+
+function envNumber(name: string, defaultValue: number): number {
+	const raw = process.env[name];
+	if (!raw) return defaultValue;
+	const value = Number(raw);
+	return Number.isFinite(value) && value > 0 ? value : defaultValue;
+}
+
+function isBroadRootSearch(command: string): boolean {
+	const normalized = command.replace(/\s+/g, " ").trim();
+	return (
+		/\bgrep\s+[^;&|]*-(?:[^\s]*[rR][^\s]*)\s+[^;&|]*\s\/(?:\s|$)/.test(normalized) ||
+		/\bgrep\s+[^;&|]*\s\/(?:\s|$)[^;&|]*-(?:[^\s]*[rR][^\s]*)/.test(normalized) ||
+		/\bfind\s+\/(?:\s|$)/.test(normalized) ||
+		/\bxargs\s+grep\b/.test(normalized)
+	);
+}
+
+function installBashTimeoutGuard(pi: ExtensionAPI) {
+	if (envFlag("XAI_BASH_GUARD", true) === false) return;
+
+	const defaultTimeout = envNumber("XAI_BASH_DEFAULT_TIMEOUT", DEFAULT_BASH_TIMEOUT_SECONDS);
+	const searchTimeout = envNumber("XAI_BASH_SEARCH_TIMEOUT", SEARCH_BASH_TIMEOUT_SECONDS);
+	const maxTimeout = envNumber("XAI_BASH_MAX_TIMEOUT", MAX_BASH_TIMEOUT_SECONDS);
+
+	pi.on("tool_call", async (event) => {
+		if (event.toolName !== "bash") return undefined;
+
+		const input = event.input as AnyRecord;
+		const command = typeof input.command === "string" ? input.command : "";
+		const requestedTimeout = Number(input.timeout);
+		const fallbackTimeout = isBroadRootSearch(command) ? searchTimeout : defaultTimeout;
+		const timeout = Number.isFinite(requestedTimeout) && requestedTimeout > 0 ? requestedTimeout : fallbackTimeout;
+
+		input.timeout = Math.max(1, Math.min(Math.floor(timeout), maxTimeout));
+		return undefined;
+	});
 }
 
 function contentToInput(content: any): AnyRecord[] {
@@ -601,6 +642,8 @@ const modelDefaults = {
 };
 
 export default function (pi: ExtensionAPI) {
+	installBashTimeoutGuard(pi);
+
 	pi.registerProvider(WS_PROVIDER, {
 		baseUrl: process.env.XAI_WS_URL || DEFAULT_URL,
 		apiKey: "XAI_API_KEY",
